@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/ini.v1"
 )
@@ -24,10 +25,11 @@ const (
 )
 
 type config struct {
-	debug_mode bool
-	ready_path string
-	opus_path  string
-	paid_path  string
+	debug_mode  bool
+	ignore_days int
+	ready_path  string
+	opus_list   string
+	paid_path   string
 }
 
 var (
@@ -44,6 +46,8 @@ var Pur = "\033[35m"
 var Cya = "\033[36m"
 var Gra = "\033[37m"
 var Whi = "\033[97m"
+
+var csvData [][]string
 
 // #################################################################################################
 // ##### Functions #################################################################################
@@ -74,26 +78,93 @@ func readCsvFile(filePath string) ([][]string, error) {
 	return data, nil
 }
 
-func searchOpusFiles(opus_path string) ([]string, error) {
-	var csvFiles []string
+func moveFile(src, dst string) error {
+	// fmt.Printf("  -> Verschiebe Datei von %s nach %s\n", src, dst)
 
-	fmt.Printf("Suche nach OPUS-Listen in %s\n", opus_path)
+	// Sicherstellen, dass Zielordner existiert
+	err := os.MkdirAll(filepath.Dir(dst), os.ModePerm)
+	if err != nil {
+		log.Fatalf("  Fehler beim Erstellen des Zielordners: %v", err)
+	}
 
-	err := filepath.WalkDir(opus_path, func(path string, d os.DirEntry, err error) error {
+	// Datei verschieben
+	err = os.Rename(src, dst)
+	if err != nil {
+		log.Fatalf("  Fehler beim Verschieben der Datei: %v", err)
+	}
+
+	return nil
+}
+
+func searchInvoiceInOpusList(invoiceNumber string) bool {
+	for _, record := range csvData {
+		// Konto/Kundennummer   = record[1]
+		// Rechnungsnummer      = record[3]
+		// Soll                 = record[6]
+		// Haben                = record[7]
+		// Saldo                = record[8]
+
+		if record[3] == invoiceNumber {
+			// fmt.Printf(" :: gefunden in OPUS-Liste: %v   == %s / %s / %s\n", record[3], record[6], record[7], record[8])
+			return true
+		}
+	}
+
+	return false
+}
+
+func searchInvoices() error {
+	fmt.Printf("Lese Datei: %s\n", CONFIG.opus_list)
+	csvData, _ = readCsvFile(CONFIG.opus_list)
+	fmt.Printf("Gelesene Daten aus %s (ohne Kopfzeile): %d\n", CONFIG.opus_list, len(csvData))
+
+	fmt.Printf("Suche nach Rechnungen in %s\n", CONFIG.ready_path)
+
+	threshold := time.Now().AddDate(0, 0, (CONFIG.ignore_days * -1)) // CONFIG.ignore_days Tage in der Vergangenheit
+
+	err := filepath.WalkDir(CONFIG.ready_path, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && filepath.Ext(d.Name()) == ".csv" {
-			csvFiles = append(csvFiles, path)
+		if !d.IsDir() && filepath.Ext(d.Name()) == ".pdf" {
+			info, err := d.Info()
+			if err != nil {
+				log.Printf("Fehler beim Abrufen der Dateiinfo für %s: %v", path, err)
+				return nil // Weiter mit der nächsten Datei
+			}
+
+			if info.ModTime().Before(threshold) {
+				filename := d.Name()
+				if len(filename) >= 8 { // Rechnungsnummer ist 8 Zeichen lang, + .pdf sind 4, gesamt 12.
+					invoiceNumber := filename[len(filename)-12 : len(filename)-4]
+					fmt.Printf(" - %-31s", d.Name())
+
+					if !searchInvoiceInOpusList(invoiceNumber) {
+						merr := moveFile(filepath.Join(CONFIG.ready_path, filename), filepath.Join(CONFIG.paid_path, filename))
+
+						if merr == nil {
+							fmt.Printf(" %snach %s verschoben%s\n", Grn, CONFIG.ready_path, Rst)
+						} else {
+							fmt.Printf(" %s(Fehler beim verschieben: %w)%s\n", Red, merr, Rst)
+						}
+					} else {
+						fmt.Printf(" %s(ignoriert - in OPUS-Liste gefunden)%s\n", Gra, Rst)
+					}
+				} else {
+					fmt.Printf(" - %-31s %s(ignoriert - Name zu kurz)%s\n", d.Name(), Gra, Rst)
+				}
+			} else {
+				fmt.Printf(" - %-31s %s(ignoriert - jünger als %d Tage)%s\n", d.Name(), Gra, CONFIG.ignore_days, Rst)
+			}
 		}
 		return nil
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("Fehler beim Durchsuchen des Verzeichnisses %s: %w", opus_path, err)
+		return fmt.Errorf(" - Fehler beim Durchsuchen des Verzeichnisses %s: %w", CONFIG.ready_path, err)
 	}
 
-	return csvFiles, nil
+	return nil
 }
 
 // #################################################################################################
@@ -117,36 +188,14 @@ func main() {
 	} else {
 		CONFIG.debug_mode = false
 	}
+	CONFIG.ignore_days = section.Key("ignore_days").MustInt()
+	CONFIG.opus_list = section.Key("opus_list").String()
 	CONFIG.ready_path = section.Key("ready_path").String()
-	CONFIG.opus_path = section.Key("opus_path").String()
 	CONFIG.paid_path = section.Key("paid_path").String()
 
-	csvFiles, err := searchOpusFiles(CONFIG.opus_path)
+	err = searchInvoices()
 	if err != nil {
-		log.Fatalf("Fehler beim Suchen der OPUS-Dateien: %v", err)
-	}
-
-	if len(csvFiles) > 0 {
-		fmt.Println("\nVerarbeite OPUS-CSV-Dateien:")
-		for _, file := range csvFiles {
-			fmt.Printf("Lese Datei: %s\n", file)
-			csvData, err := readCsvFile(file)
-			if err != nil {
-				log.Printf("Fehler beim Lesen der Datei %s: %v", file, err)
-				continue
-			}
-
-			fmt.Printf("Gelesene Daten aus %s (ohne Kopfzeile):\n", file)
-			for i, record := range csvData {
-				fmt.Printf("  Record %d: %v   == %s / %s / %s\n", i+1, record[3], record[6], record[7], record[8])
-
-				// Konto/Kundennummer   = record[1]
-				// Rechnungsnummer      = record[3]
-				// Soll                 = record[6]
-				// Haben                = record[7]
-				// Saldo                = record[8]
-			}
-		}
+		log.Fatalf("Fehler beim Suchen der Rechnungen: %v", err)
 	}
 
 	fmt.Println("Fertig")
