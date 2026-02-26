@@ -1,2 +1,6 @@
 *.exe
 *.ini
+opus-data/.~lock.*
+opus-data/*.csv
+invoice-sent/*.pdf
+invoice-paid/*.pdf
