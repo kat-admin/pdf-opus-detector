@@ -21,7 +21,7 @@ import (
 
 const (
 	APPNAME = "pdf-opus-detector"
-	APPVERS = "26.02.26"
+	APPVERS = "26.05.07"
 )
 
 type config struct {
@@ -145,7 +145,7 @@ func searchInvoices() error {
 						if merr == nil {
 							fmt.Printf(" %snach %s verschoben%s\n", Grn, CONFIG.ready_path, Rst)
 						} else {
-							fmt.Printf(" %s(Fehler beim verschieben: %w)%s\n", Red, merr, Rst)
+							fmt.Printf(" %s(Fehler beim verschieben: %s)%s\n", Red, merr, Rst)
 						}
 					} else {
 						fmt.Printf(" %s(ignoriert - in OPUS-Liste gefunden)%s\n", Gra, Rst)
@@ -193,9 +193,24 @@ func main() {
 	CONFIG.ready_path = section.Key("ready_path").String()
 	CONFIG.paid_path = section.Key("paid_path").String()
 
+	// Prüfung ob OPUS-Liste existiert
+	if _, err := os.Stat(CONFIG.opus_list); os.IsNotExist(err) {
+		fmt.Printf("%sAbbruch: Die Datei '%s' wurde nicht gefunden.%s\n", Red, CONFIG.opus_list, Rst)
+		os.Exit(1)
+	}
+
 	err = searchInvoices()
 	if err != nil {
 		log.Fatalf("Fehler beim Suchen der Rechnungen: %v", err)
+	}
+
+	// Rename opus_list to opus_list.yyyy-mm-dd
+	newName := CONFIG.opus_list + "." + time.Now().Format("2006-01-02_15-04-05")
+	err = os.Rename(CONFIG.opus_list, newName)
+	if err != nil {
+		fmt.Printf("%sFehler beim Umbenennen der Datei %s nach %s: %v%s\n", Red, CONFIG.opus_list, newName, err, Rst)
+	} else {
+		fmt.Printf("Datei %s wurde erfolgreich in %s umbenannt.\n", CONFIG.opus_list, newName)
 	}
 
 	fmt.Println("Fertig")
